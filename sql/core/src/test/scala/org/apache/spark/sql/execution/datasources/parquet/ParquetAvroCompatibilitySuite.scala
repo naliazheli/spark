@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.datasources.parquet
 
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.util.{List => JList, Map => JMap}
 
 import scala.collection.JavaConverters._
@@ -26,6 +27,7 @@ import org.apache.avro.Schema
 import org.apache.avro.generic.IndexedRecord
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.avro.AvroParquetWriter
+import org.apache.parquet.hadoop.ParquetWriter
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.datasources.parquet.test.avro._
@@ -34,14 +36,14 @@ import org.apache.spark.sql.test.SharedSQLContext
 class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with SharedSQLContext {
   private def withWriter[T <: IndexedRecord]
       (path: String, schema: Schema)
-      (f: AvroParquetWriter[T] => Unit): Unit = {
+      (f: ParquetWriter[T] => Unit): Unit = {
     logInfo(
       s"""Writing Avro records with the following Avro schema into Parquet file:
          |
          |${schema.toString(true)}
        """.stripMargin)
 
-    val writer = new AvroParquetWriter[T](new Path(path), schema)
+    val writer = AvroParquetWriter.builder[T](new Path(path)).withSchema(schema).build()
     try f(writer) finally writer.close()
   }
 
@@ -58,7 +60,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
               .setLongColumn(i.toLong * 10)
               .setFloatColumn(i.toFloat + 0.1f)
               .setDoubleColumn(i.toDouble + 0.2d)
-              .setBinaryColumn(ByteBuffer.wrap(s"val_$i".getBytes("UTF-8")))
+              .setBinaryColumn(ByteBuffer.wrap(s"val_$i".getBytes(StandardCharsets.UTF_8)))
               .setStringColumn(s"val_$i")
               .build())
         }
@@ -66,14 +68,14 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         Row(
           i % 2 == 0,
           i,
           i.toLong * 10,
           i.toFloat + 0.1f,
           i.toDouble + 0.2d,
-          s"val_$i".getBytes("UTF-8"),
+          s"val_$i".getBytes(StandardCharsets.UTF_8),
           s"val_$i")
       })
     }
@@ -102,7 +104,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
               .setMaybeLongColumn(i.toLong * 10)
               .setMaybeFloatColumn(i.toFloat + 0.1f)
               .setMaybeDoubleColumn(i.toDouble + 0.2d)
-              .setMaybeBinaryColumn(ByteBuffer.wrap(s"val_$i".getBytes("UTF-8")))
+              .setMaybeBinaryColumn(ByteBuffer.wrap(s"val_$i".getBytes(StandardCharsets.UTF_8)))
               .setMaybeStringColumn(s"val_$i")
               .build()
           }
@@ -113,7 +115,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         if (i % 3 == 0) {
           Row.apply(Seq.fill(7)(null): _*)
         } else {
@@ -123,7 +125,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
             i.toLong * 10,
             i.toFloat + 0.1f,
             i.toDouble + 0.2d,
-            s"val_$i".getBytes("UTF-8"),
+            s"val_$i".getBytes(StandardCharsets.UTF_8),
             s"val_$i")
         }
       })
@@ -154,7 +156,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         Row(
           Seq.tabulate(3)(i => s"val_$i"),
           if (i % 3 == 0) null else Seq.tabulate(3)(identity))
@@ -181,7 +183,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         Row(Seq.tabulate(3, 3)((i, j) => i * 3 + j))
       })
     }
@@ -204,7 +206,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         Row(Seq.tabulate(3)(i => i.toString -> Seq.tabulate(3)(j => i + j)).toMap)
       })
     }
@@ -220,7 +222,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
 
       logParquetSchema(path)
 
-      checkAnswer(sqlContext.read.parquet(path), (0 until 10).map { i =>
+      checkAnswer(spark.read.parquet(path), (0 until 10).map { i =>
         Row(
           Seq.tabulate(3)(n => s"arr_${i + n}"),
           Seq.tabulate(3)(n => n.toString -> (i + n: Integer)).toMap,
@@ -266,7 +268,7 @@ class ParquetAvroCompatibilitySuite extends ParquetCompatibilityTest with Shared
         }
       }
 
-      checkAnswer(sqlContext.read.parquet(path).filter('suit === "SPADES"), Row("SPADES"))
+      checkAnswer(spark.read.parquet(path).filter('suit === "SPADES"), Row("SPADES"))
     }
   }
 }

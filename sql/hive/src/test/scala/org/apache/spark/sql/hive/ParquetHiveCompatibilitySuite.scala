@@ -18,37 +18,18 @@
 package org.apache.spark.sql.hive
 
 import java.sql.Timestamp
-import java.util.{Locale, TimeZone}
 
-import org.apache.hadoop.hive.conf.HiveConf
-import org.scalatest.BeforeAndAfterAll
-
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.datasources.parquet.ParquetCompatibilityTest
-import org.apache.spark.sql.hive.test.TestHive
-import org.apache.spark.sql.{Row, SQLConf, SQLContext}
+import org.apache.spark.sql.hive.test.TestHiveSingleton
+import org.apache.spark.sql.internal.SQLConf
 
-class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with BeforeAndAfterAll {
-  override def _sqlContext: SQLContext = TestHive
-  private val sqlContext = _sqlContext
-
+class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with TestHiveSingleton {
   /**
    * Set the staging directory (and hence path to ignore Parquet files under)
-   * to that set by [[HiveConf.ConfVars.STAGINGDIR]].
+   * to the default value of hive.exec.stagingdir.
    */
-  private val stagingDir = new HiveConf().getVar(HiveConf.ConfVars.STAGINGDIR)
-
-  private val originalTimeZone = TimeZone.getDefault
-  private val originalLocale = Locale.getDefault
-
-  protected override def beforeAll(): Unit = {
-    TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"))
-    Locale.setDefault(Locale.US)
-  }
-
-  override protected def afterAll(): Unit = {
-    TimeZone.setDefault(originalTimeZone)
-    Locale.setDefault(originalLocale)
-  }
+  private val stagingDir = ".hive-staging"
 
   override protected def logParquetSchema(path: String): Unit = {
     val schema = readParquetSchema(path, { path =>
@@ -70,8 +51,8 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with Before
         val rows = row :: Row(Seq.fill(row.length)(null): _*) :: Nil
 
         // Don't convert Hive metastore Parquet tables to let Hive write those Parquet files.
-        withSQLConf(HiveContext.CONVERT_METASTORE_PARQUET.key -> "false") {
-          withTempTable("data") {
+        withSQLConf(HiveUtils.CONVERT_METASTORE_PARQUET.key -> "false") {
+          withTempView("data") {
             val fields = hiveTypes.zipWithIndex.map { case (typ, index) => s"  col_$index $typ" }
 
             val ddl =
@@ -87,12 +68,12 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with Before
                  |$ddl
                """.stripMargin)
 
-            sqlContext.sql(ddl)
+            spark.sql(ddl)
 
-            val schema = sqlContext.table("parquet_compat").schema
-            val rowRDD = sqlContext.sparkContext.parallelize(rows).coalesce(1)
-            sqlContext.createDataFrame(rowRDD, schema).registerTempTable("data")
-            sqlContext.sql("INSERT INTO TABLE parquet_compat SELECT * FROM data")
+            val schema = spark.table("parquet_compat").schema
+            val rowRDD = spark.sparkContext.parallelize(rows).coalesce(1)
+            spark.createDataFrame(rowRDD, schema).createOrReplaceTempView("data")
+            spark.sql("INSERT INTO TABLE parquet_compat SELECT * FROM data")
           }
         }
 
@@ -101,7 +82,7 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with Before
         // Unfortunately parquet-hive doesn't add `UTF8` annotation to BINARY when writing strings.
         // Have to assume all BINARY values are strings here.
         withSQLConf(SQLConf.PARQUET_BINARY_AS_STRING.key -> "true") {
-          checkAnswer(sqlContext.read.parquet(path), rows)
+          checkAnswer(spark.read.parquet(path), rows)
         }
       }
     }
@@ -153,5 +134,11 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with Before
     testParquetHiveCompatibility(
       Row(Row(1, Seq("foo", "bar", null))),
       "STRUCT<f0: INT, f1: ARRAY<STRING>>")
+  }
+
+  test("SPARK-16344: array of struct with a single field named 'array_element'") {
+    testParquetHiveCompatibility(
+      Row(Seq(Row(1))),
+      "ARRAY<STRUCT<array_element: INT>>")
   }
 }

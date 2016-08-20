@@ -17,9 +17,10 @@
 
 package org.apache.spark.scheduler.cluster.mesos
 
+import scala.collection.JavaConverters._
 import scala.language.reflectiveCalls
 
-import org.apache.mesos.Protos.Value
+import org.apache.mesos.Protos.{Resource, Value}
 import org.mockito.Mockito._
 import org.scalatest._
 import org.scalatest.mock.MockitoSugar
@@ -35,34 +36,69 @@ class MesosSchedulerUtilsSuite extends SparkFunSuite with Matchers with MockitoS
     val sc = mock[SparkContext]
     when(sc.conf).thenReturn(sparkConf)
   }
+
+  private def createTestPortResource(range: (Long, Long), role: Option[String] = None): Resource = {
+    val rangeValue = Value.Range.newBuilder()
+    rangeValue.setBegin(range._1)
+    rangeValue.setEnd(range._2)
+    val builder = Resource.newBuilder()
+      .setName("ports")
+      .setType(Value.Type.RANGES)
+      .setRanges(Value.Ranges.newBuilder().addRange(rangeValue))
+
+    role.foreach { r => builder.setRole(r) }
+    builder.build()
+  }
+
+  private def rangesResourcesToTuple(resources: List[Resource]): List[(Long, Long)] = {
+    resources.flatMap{resource => resource.getRanges.getRangeList
+      .asScala.map(range => (range.getBegin, range.getEnd))}
+  }
+
+  def arePortsEqual(array1: Array[(Long, Long)], array2: Array[(Long, Long)])
+    : Boolean = {
+    array1.sortBy(identity).deep == array2.sortBy(identity).deep
+  }
+
+  def arePortsEqual(array1: Array[Long], array2: Array[Long])
+    : Boolean = {
+    array1.sortBy(identity).deep == array2.sortBy(identity).deep
+  }
+
+  def getRangesFromResources(resources: List[Resource]): List[(Long, Long)] = {
+    resources.flatMap{ resource =>
+      resource.getRanges.getRangeList.asScala.toList.map{
+        range => (range.getBegin, range.getEnd)}}
+  }
+
   val utils = new MesosSchedulerUtils { }
   // scalastyle:on structural.type
 
   test("use at-least minimum overhead") {
     val f = fixture
     when(f.sc.executorMemory).thenReturn(512)
-    utils.calculateTotalMemory(f.sc) shouldBe 896
+    utils.executorMemory(f.sc) shouldBe 896
   }
 
   test("use overhead if it is greater than minimum value") {
     val f = fixture
     when(f.sc.executorMemory).thenReturn(4096)
-    utils.calculateTotalMemory(f.sc) shouldBe 4505
+    utils.executorMemory(f.sc) shouldBe 4505
   }
 
   test("use spark.mesos.executor.memoryOverhead (if set)") {
     val f = fixture
     when(f.sc.executorMemory).thenReturn(1024)
     f.sparkConf.set("spark.mesos.executor.memoryOverhead", "512")
-    utils.calculateTotalMemory(f.sc) shouldBe 1536
+    utils.executorMemory(f.sc) shouldBe 1536
   }
 
   test("parse a non-empty constraint string correctly") {
     val expectedMap = Map(
-      "tachyon" -> Set("true"),
+      "os" -> Set("centos7"),
       "zone" -> Set("us-east-1a", "us-east-1b")
     )
-    utils.parseConstraintString("tachyon:true;zone:us-east-1a,us-east-1b") should be (expectedMap)
+    utils.parseConstraintString("os:centos7;zone:us-east-1a,us-east-1b") should be (expectedMap)
   }
 
   test("parse an empty constraint string correctly") {
@@ -71,35 +107,35 @@ class MesosSchedulerUtilsSuite extends SparkFunSuite with Matchers with MockitoS
 
   test("throw an exception when the input is malformed") {
     an[IllegalArgumentException] should be thrownBy
-      utils.parseConstraintString("tachyon;zone:us-east")
+      utils.parseConstraintString("os;zone:us-east")
   }
 
   test("empty values for attributes' constraints matches all values") {
-    val constraintsStr = "tachyon:"
+    val constraintsStr = "os:"
     val parsedConstraints = utils.parseConstraintString(constraintsStr)
 
-    parsedConstraints shouldBe Map("tachyon" -> Set())
+    parsedConstraints shouldBe Map("os" -> Set())
 
     val zoneSet = Value.Set.newBuilder().addItem("us-east-1a").addItem("us-east-1b").build()
-    val noTachyonOffer = Map("zone" -> zoneSet)
-    val tachyonTrueOffer = Map("tachyon" -> Value.Text.newBuilder().setValue("true").build())
-    val tachyonFalseOffer = Map("tachyon" -> Value.Text.newBuilder().setValue("false").build())
+    val noOsOffer = Map("zone" -> zoneSet)
+    val centosOffer = Map("os" -> Value.Text.newBuilder().setValue("centos").build())
+    val ubuntuOffer = Map("os" -> Value.Text.newBuilder().setValue("ubuntu").build())
 
-    utils.matchesAttributeRequirements(parsedConstraints, noTachyonOffer) shouldBe false
-    utils.matchesAttributeRequirements(parsedConstraints, tachyonTrueOffer) shouldBe true
-    utils.matchesAttributeRequirements(parsedConstraints, tachyonFalseOffer) shouldBe true
+    utils.matchesAttributeRequirements(parsedConstraints, noOsOffer) shouldBe false
+    utils.matchesAttributeRequirements(parsedConstraints, centosOffer) shouldBe true
+    utils.matchesAttributeRequirements(parsedConstraints, ubuntuOffer) shouldBe true
   }
 
   test("subset match is performed for set attributes") {
     val supersetConstraint = Map(
-      "tachyon" -> Value.Text.newBuilder().setValue("true").build(),
+      "os" -> Value.Text.newBuilder().setValue("ubuntu").build(),
       "zone" -> Value.Set.newBuilder()
         .addItem("us-east-1a")
         .addItem("us-east-1b")
         .addItem("us-east-1c")
         .build())
 
-    val zoneConstraintStr = "tachyon:;zone:us-east-1a,us-east-1c"
+    val zoneConstraintStr = "os:;zone:us-east-1a,us-east-1c"
     val parsedConstraints = utils.parseConstraintString(zoneConstraintStr)
 
     utils.matchesAttributeRequirements(parsedConstraints, supersetConstraint) shouldBe true
@@ -131,13 +167,89 @@ class MesosSchedulerUtilsSuite extends SparkFunSuite with Matchers with MockitoS
   }
 
   test("equality match is performed for text attributes") {
-    val offerAttribs = Map("tachyon" -> Value.Text.newBuilder().setValue("true").build())
+    val offerAttribs = Map("os" -> Value.Text.newBuilder().setValue("centos7").build())
 
-    val trueConstraint = utils.parseConstraintString("tachyon:true")
-    val falseConstraint = utils.parseConstraintString("tachyon:false")
+    val trueConstraint = utils.parseConstraintString("os:centos7")
+    val falseConstraint = utils.parseConstraintString("os:ubuntu")
 
     utils.matchesAttributeRequirements(trueConstraint, offerAttribs) shouldBe true
     utils.matchesAttributeRequirements(falseConstraint, offerAttribs) shouldBe false
   }
 
+  test("Port reservation is done correctly with user specified ports only") {
+    val conf = new SparkConf()
+    conf.set("spark.executor.port", "3000" )
+    conf.set("spark.blockManager.port", "4000")
+    val portResource = createTestPortResource((3000, 5000), Some("my_role"))
+
+    val (resourcesLeft, resourcesToBeUsed) = utils
+      .partitionPortResources(List(3000, 4000), List(portResource))
+    resourcesToBeUsed.length shouldBe 2
+
+    val portsToUse = getRangesFromResources(resourcesToBeUsed).map{r => r._1}.toArray
+
+    portsToUse.length shouldBe 2
+    arePortsEqual(portsToUse, Array(3000L, 4000L)) shouldBe true
+
+    val portRangesToBeUsed = rangesResourcesToTuple(resourcesToBeUsed)
+
+    val expectedUSed = Array((3000L, 3000L), (4000L, 4000L))
+
+    arePortsEqual(portRangesToBeUsed.toArray, expectedUSed) shouldBe true
+  }
+
+  test("Port reservation is done correctly with some user specified ports (spark.executor.port)") {
+    val conf = new SparkConf()
+    conf.set("spark.executor.port", "3100" )
+    val portResource = createTestPortResource((3000, 5000), Some("my_role"))
+
+    val (resourcesLeft, resourcesToBeUsed) = utils
+      .partitionPortResources(List(3100), List(portResource))
+
+    val portsToUse = getRangesFromResources(resourcesToBeUsed).map{r => r._1}
+
+    portsToUse.length shouldBe 1
+    portsToUse.contains(3100) shouldBe true
+  }
+
+  test("Port reservation is done correctly with all random ports") {
+    val conf = new SparkConf()
+    val portResource = createTestPortResource((3000L, 5000L), Some("my_role"))
+
+    val (resourcesLeft, resourcesToBeUsed) = utils
+      .partitionPortResources(List(), List(portResource))
+    val portsToUse = getRangesFromResources(resourcesToBeUsed).map{r => r._1}
+
+    portsToUse.isEmpty shouldBe true
+  }
+
+  test("Port reservation is done correctly with user specified ports only - multiple ranges") {
+    val conf = new SparkConf()
+    conf.set("spark.executor.port", "2100" )
+    conf.set("spark.blockManager.port", "4000")
+    val portResourceList = List(createTestPortResource((3000, 5000), Some("my_role")),
+      createTestPortResource((2000, 2500), Some("other_role")))
+    val (resourcesLeft, resourcesToBeUsed) = utils
+      .partitionPortResources(List(2100, 4000), portResourceList)
+    val portsToUse = getRangesFromResources(resourcesToBeUsed).map{r => r._1}
+
+    portsToUse.length shouldBe 2
+    val portsRangesLeft = rangesResourcesToTuple(resourcesLeft)
+    val portRangesToBeUsed = rangesResourcesToTuple(resourcesToBeUsed)
+
+    val expectedUsed = Array((2100L, 2100L), (4000L, 4000L))
+
+    arePortsEqual(portsToUse.toArray, Array(2100L, 4000L)) shouldBe true
+    arePortsEqual(portRangesToBeUsed.toArray, expectedUsed) shouldBe true
+  }
+
+  test("Port reservation is done correctly with all random ports - multiple ranges") {
+    val conf = new SparkConf()
+    val portResourceList = List(createTestPortResource((3000, 5000), Some("my_role")),
+      createTestPortResource((2000, 2500), Some("other_role")))
+    val (resourcesLeft, resourcesToBeUsed) = utils
+      .partitionPortResources(List(), portResourceList)
+    val portsToUse = getRangesFromResources(resourcesToBeUsed).map{r => r._1}
+    portsToUse.isEmpty shouldBe true
+  }
 }
